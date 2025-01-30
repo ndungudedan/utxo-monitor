@@ -1,0 +1,33 @@
+[package]
+name = "utxo-observer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitcoincore-rpc = "0.19.0"
+warp = "0.3"
+toml = "0.5"
+
+serde = "1.0.127"
+serde_json = "1"
+
+log = { version = "0.4.17" }
+env_logger = { version = "0.9.0" }
+hex = { version = "0.4" }
+rusqlite = { version = "0.27.0", features = ["bundled"] }
+tokio = { version = "1.35", features = ["full"] }
+minreq = { version = "2.6.0", features = ["json-using-serde"] }
+tokio-stream = { version = "0.1.11", features = ["sync"] }
+futures-util = "0.3"
+petgraph = { version = "0.6.2", features = ["serde-1"] }
+base64 = "0.13.1"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1.58"
+bitcoin-pool-identification = "0.3.4"
+zmq = "0.10.0"
+bitcoin = "0.32.5"
+reqwest = "0.12.12"
+
+[features]
+
+strict = [] # Treat warnings as a build error.

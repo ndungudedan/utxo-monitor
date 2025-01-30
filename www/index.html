@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TraceIt</title>
+</head>
+
+<body>
+    <h2>B Notified</h2>
+    <p>Add a Bitcoin (Mainnet) address you would like to get notified when a transaction happens below.</p>
+    <p>You can pick some<a href="https://bitinfocharts.com/top-100-richest-bitcoin-addresses.html"> addresses here </a> that tickle your interest.</p>
+    <input type="text" id="userInput" placeholder="Enter address...">
+    <button onclick="sendMessage()">Send</button>
+    <h3>Messages from Server:</h3>
+    <ul id="messages"></ul>
+
+    <script>
+        function getOrCreateSessionId() {
+            let sessionId = document.cookie.split('; ').find(row => row.startsWith('session_id='));
+            if (!sessionId) {
+                sessionId = `session_id=${crypto.randomUUID()}; path=/; expires=Fri, 31 Dec 9999 23:59:59 GMT`;
+                document.cookie = sessionId;
+            }
+            return sessionId.split('=')[1];
+        }
+
+        const sessionId = getOrCreateSessionId();
+        const socket = new WebSocket(`ws://localhost:9090/ws?session_id=${sessionId}`);
+
+        socket.onopen = () => console.log(`✅ Connected as ${sessionId}`);
+        socket.onmessage = (event) => {
+            const li = document.createElement("li");
+            li.textContent = event.data;
+            document.getElementById("messages").appendChild(li);
+        };
+
+        function sendMessage() {
+            const input = document.getElementById("userInput").value;
+            if (input.trim() !== "") {
+                socket.send(input);
+            }
+        }
+    </script>
+</body>
+
+</html>
