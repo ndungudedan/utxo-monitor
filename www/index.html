@@ -10,7 +10,8 @@
 <body>
     <h2>B Notified</h2>
     <p>Add a Bitcoin (Mainnet) address you would like to get notified when a transaction happens below.</p>
-    <p>You can pick some<a href="https://bitinfocharts.com/top-100-richest-bitcoin-addresses.html"> addresses here </a> that tickle your interest.</p>
+    <p>You can pick some<a href="https://bitinfocharts.com/top-100-richest-bitcoin-addresses.html" target="_blank" rel="noopener noreferrer"> addresses here </a> that tickle your interest.</p>
+    <p>Code is accessible:<a href="https://github.com/ndungudedan/utxo-monitor" target="_blank" rel="noopener noreferrer"> Github </a></p>
     <input type="text" id="userInput" placeholder="Enter address...">
     <button onclick="sendMessage()">Send</button>
     <h3>Messages from Server:</h3>
@@ -27,7 +28,7 @@
         }
 
         const sessionId = getOrCreateSessionId();
-        const socket = new WebSocket(`ws://localhost:9090/ws?session_id=${sessionId}`);
+        const socket = new WebSocket(`wss://utxo.swappy.tech/ws?session_id=${sessionId}`);
 
         socket.onopen = () => console.log(`✅ Connected as ${sessionId}`);
         socket.onmessage = (event) => {

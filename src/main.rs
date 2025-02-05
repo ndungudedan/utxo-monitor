@@ -119,8 +119,8 @@ async fn main() {
     let routes = ws_route.with(warp::cors().allow_any_origin());
 
     task::spawn(async move {
-        println!("🚀 WebSocket server running at ws://localhost:9090/ws");
-        warp::serve(routes).run(([127, 0, 0, 1], 9090)).await;
+        println!("🚀 WebSocket server running at ws://0.0.0.0:9090/ws");
+        warp::serve(routes).run(([0, 0, 0, 0], 9090)).await;
     });
 
     let is_pruned = is_bitcoin_node_pruned();
