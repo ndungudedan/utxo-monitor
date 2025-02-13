@@ -10,38 +10,88 @@
 <body>
     <h2>B Notified</h2>
     <p>Add a Bitcoin (Mainnet) address you would like to get notified when a transaction happens below.</p>
-    <p>You can pick some<a href="https://bitinfocharts.com/top-100-richest-bitcoin-addresses.html" target="_blank" rel="noopener noreferrer"> addresses here </a> that tickle your interest.</p>
-    <p>Code is accessible:<a href="https://github.com/ndungudedan/utxo-monitor" target="_blank" rel="noopener noreferrer"> Github </a></p>
-    <input type="text" id="userInput" placeholder="Enter address...">
-    <button onclick="sendMessage()">Send</button>
+    <p>You can pick some <a href="https://bitinfocharts.com/top-100-richest-bitcoin-addresses.html" target="_blank"
+            rel="noopener noreferrer">addresses here</a> that tickle your interest.</p>
+    <p>Code is accessible: <a href="https://github.com/ndungudedan/utxo-monitor" target="_blank"
+            rel="noopener noreferrer">GitHub</a></p>
+
+    <div id="pubkeyForm">
+        <h3>Enter your Nostr Public Key</h3>
+        <input type="text" id="pubkeyInput" placeholder="Enter Nostr pubkey...">
+        <button onclick="submitPubKey()">Submit</button>
+    </div>
+
+    <div id="monitorSection" style="display:none;">
+        <h3>Monitor Bitcoin Address</h3>
+        <input type="text" id="btcAddressInput" placeholder="Enter Bitcoin address...">
+        <button onclick="submitBtcAddress()">Monitor</button>
+        <h3>Monitored Addresses:</h3>
+        <ul id="monitoredAddresses"></ul>
+    </div>
+
     <h3>Messages from Server:</h3>
     <ul id="messages"></ul>
 
     <script>
-        function getOrCreateSessionId() {
-            let sessionId = document.cookie.split('; ').find(row => row.startsWith('session_id='));
-            if (!sessionId) {
-                sessionId = `session_id=${crypto.randomUUID()}; path=/; expires=Fri, 31 Dec 9999 23:59:59 GMT`;
-                document.cookie = sessionId;
-            }
-            return sessionId.split('=')[1];
+        function getCookie(name) {
+            const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+            return match ? match[2] : null;
         }
 
-        const sessionId = getOrCreateSessionId();
-        const socket = new WebSocket(`wss://utxo.swappy.tech/ws?session_id=${sessionId}`);
+        function setCookie(name, value) {
+            document.cookie = `${name}=${value}; path=/; expires=Fri, 31 Dec 9999 23:59:59 GMT; SameSite=Lax`;
+        }
 
-        socket.onopen = () => console.log(`✅ Connected as ${sessionId}`);
-        socket.onmessage = (event) => {
-            const li = document.createElement("li");
-            li.textContent = event.data;
-            document.getElementById("messages").appendChild(li);
-        };
-
-        function sendMessage() {
-            const input = document.getElementById("userInput").value;
-            if (input.trim() !== "") {
-                socket.send(input);
+        async function submitPubKey() {
+            const pubkey = document.getElementById("pubkeyInput").value.trim();
+            if (!/^npub1[0-9a-z]+$/.test(pubkey)) {
+                alert("Invalid Nostr pubkey!");
+                return;
             }
+            const response = await fetch("/store-user", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pubkey })
+            });
+            if (response.ok) {
+                setCookie("nostr_pubkey", pubkey);
+                location.reload();
+            } else {
+                alert("Failed to store pubkey.");
+            }
+        }
+
+        async function submitBtcAddress() {
+            const address = document.getElementById("btcAddressInput").value.trim();
+            if (address) {
+                await fetch("/monitor-address", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ address })
+                });
+                loadMonitoredAddresses();
+            }
+        }
+
+        async function loadMonitoredAddresses() {
+            const response = await fetch("/monitor-address");
+            if (response.ok) {
+                const addresses = await response.json();
+                const list = document.getElementById("monitoredAddresses");
+                list.innerHTML = "";
+                addresses.forEach(addr => {
+                    const li = document.createElement("li");
+                    li.textContent = addr['address'];
+                    list.appendChild(li);
+                });
+            }
+        }
+
+        const pubkey = getCookie("nostr_pubkey");
+        if (pubkey) {
+            document.getElementById("pubkeyForm").style.display = "none";
+            document.getElementById("monitorSection").style.display = "block";
+            loadMonitoredAddresses();
         }
     </script>
 </body>

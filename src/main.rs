@@ -1,31 +1,172 @@
+use actix_web::{App, HttpServer, Result};
 use bitcoin::address::Address;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::network::Network;
-use bitcoin::p2p::message;
 use bitcoin::Transaction;
-use futures_util::{SinkExt, StreamExt};
 use hex;
-use serde::Serialize;
+use models::{GenTransaction, InputTrans};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::process::{exit, Command};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::{
-    any::Any,
-    ops::Add,
-    process::{exit, Command},
-};
-use tokio::io::empty;
-use tokio::sync::mpsc;
 use tokio::task;
-use uuid::Uuid;
-use warp::ws::{Message, WebSocket};
-use warp::Filter;
 use zmq;
 
-type Users = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>>;
-type Pikachus = Arc<Mutex<HashMap<String, Vec<Address>>>>;
+pub mod db;
+pub mod db_operations;
+pub mod models;
+pub mod nostr_notify;
+pub mod routes;
+pub mod schema;
+
+// Maps nostr_pubkey -> [Bitcoin addresses]
+type Pikachus = HashMap<String, Vec<Address>>;
+
+#[actix_web::main]
+async fn main() -> Result<()> {
+    task::spawn(async move {
+        println!("🚀 HTTP server running at 127.0.0.1:9090");
+        if let Err(e) = HttpServer::new(move || {
+            App::new()
+                .service(routes::index)
+                .service(routes::store_user)
+                .service(routes::store_monitored_addresses)
+                .service(routes::get_monitored_addresses)
+        })
+        .bind("127.0.0.1:9090")
+        .expect("Failed to bind to port 9090")
+        .run()
+        .await
+        {
+            eprintln!("❌ Server error: {:?}", e);
+        }
+    });
+
+    let is_pruned = is_bitcoin_node_pruned();
+    let context = zmq::Context::new();
+    let subscriber = context.socket(zmq::SUB).expect("Failed to create socket");
+
+    let zmq_url = "tcp://127.0.0.1:28333";
+    subscriber
+        .connect(zmq_url)
+        .expect("Failed to connect to ZMQ");
+
+    subscriber
+        .set_subscribe(b"rawtx")
+        .expect("Failed to subscribe to rawtx");
+
+    println!("Listening for Bitcoin transactions on {}", zmq_url);
+
+    loop {
+        let topic = subscriber.recv_string(0);
+        match topic {
+            Ok(Ok(_)) => {
+                let tx_data = subscriber.recv_bytes(0).expect("Failed to receive tx data");
+                let tx_hex = hex::encode(&tx_data);
+
+                println!("New transaction received:: {:?}", tx_hex);
+
+                if let Ok(tx) = deserialize::<Transaction>(&tx_data) {
+                    find_address_match(tx, is_pruned).await;
+                } else {
+                    println!("Failed to decode transaction.");
+                }
+            }
+            Ok(Err(_)) => println!("Received non-UTF8 topic:"),
+            Err(e) => eprintln!("Error receiving message: {}", e),
+        }
+    }
+}
+
+fn process_outputs(tx: &Transaction) -> Vec<Address> {
+    println!("\n🔹 **Detecting DELIVERY (Receiver) Addresses**:");
+    let mut outs: Vec<Address> = [].to_vec();
+    for (i, output) in tx.output.iter().enumerate() {
+        if let Ok(addr) = Address::from_script(&output.script_pubkey, Network::Bitcoin) {
+            // println!(
+            //     "Output {}: Address = {} (Amount: {} sats)",
+            //     i, addr, output.value
+            // );
+            outs.push(addr);
+        } else {
+            println!("Output {}: Could not decode address", i);
+        }
+    }
+    outs
+}
+
+async fn process_inputs(tx: &Transaction, is_pruned: bool) -> Vec<InputTrans> {
+    println!("\n🔹 **Detecting SOURCING (Sender) Addresses**:");
+    let mut inputs = Vec::new();
+    for (i, input) in tx.input.iter().enumerate() {
+        let prev_txid = input.previous_output.txid.to_string();
+
+        println!("Input {}: Spends from previous TXID {}", i, prev_txid);
+
+        if let Some(prev_tx) = fetch_previous_tx(&prev_txid, &is_pruned).await {
+            println!("Fetched previous transaction: {}", prev_txid);
+            let temp = process_outputs(&prev_tx);
+            inputs.push(InputTrans {
+                txid: prev_txid,
+                output_address: temp,
+            });
+        } else {
+            println!("❌ Failed to fetch previous transaction for {}", prev_txid);
+        }
+    }
+    inputs
+}
+
+async fn find_address_match(tx: Transaction, is_pruned: bool) {
+    let inputs = process_inputs(&tx, is_pruned).await;
+    let outputs = process_outputs(&tx);
+    let genesis = GenTransaction {
+        txid: tx.compute_txid().to_string(),
+        output_address: outputs,
+        input_address: inputs,
+    };
+    println!("{:?}", genesis);
+    let pikachus = process_tagged_addresses_from_db();
+    let genesis_outs: HashSet<_> = genesis.output_address.iter().collect();
+    println!(
+        "Users to Monitor on behalf::{}, TX input addrs::{}, TX output addrs::{} ",
+        pikachus.len(),
+        genesis_outs.len(),
+        genesis.input_address.len()
+    );
+
+    pikachus.iter().for_each(|(user, user_addrs)| {
+        let matching_outs: Vec<_> = user_addrs
+            .iter()
+            .filter(|addr| genesis_outs.contains(addr))
+            .map(|f| f.to_string())
+            .collect();
+
+        if !matching_outs.is_empty() {
+           let message = format!(
+                "Your watch list Address {:?} has been spent in this tx {}",
+                matching_outs, genesis.txid
+            );
+            db_operations::store_matched_address(user.clone(), (*matching_outs).to_vec(), genesis.txid.clone(),None);
+            nostr_notify::send_message(message,user.to_string());
+        }
+
+        genesis.input_address.iter().for_each(|f|{
+            let genesis_ins:Vec<_> =f.output_address.iter().collect();
+            let matching_ins:Vec<_>=user_addrs.iter().filter(|addr| genesis_ins.contains(addr)).map(|f| f.to_string()).collect();
+            if !matching_ins.is_empty(){
+                let message = format!(
+                    "Your watch list Address {:?} has been spent as an input for this tx {}. The input was previously funnded by this tx: {}",
+                    matching_ins, genesis.txid,f.txid
+                );
+                db_operations::store_matched_address(user.clone(), (*matching_ins).to_vec(), genesis.txid.clone(),Some(f.txid.clone()));
+            println!("----- Attempting to send:: {}", message);
+            nostr_notify::send_message(message,user.to_string());
+            }
+
+        });
+    });
+}
 
 async fn fetch_previous_tx(prev_txid: &str, is_pruned: &bool) -> Option<Transaction> {
     if *is_pruned {
@@ -91,245 +232,25 @@ fn is_bitcoin_node_pruned() -> bool {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let users = Users::default();
-    let pikachus: Pikachus = Pikachus::default();
-    let ws_route = warp::path("ws")
-        .and(warp::ws())
-        .and(warp::filters::query::query::<HashMap<String, String>>())
-        .and(with_users(users.clone()))
-        .and(with_pikachus(pikachus.clone()))
-        .map(
-            |ws: warp::ws::Ws,
-             params: HashMap<String, String>,
-             users: Users,
-             pikachus: Pikachus| {
-                let session_id = params
-                    .get("session_id")
-                    .cloned()
-                    .unwrap_or_else(|| Uuid::new_v4().to_string()); // Generate new UUID if missing
+fn process_tagged_addresses_from_db() -> Pikachus {
+    let all_addr = db_operations::get_all_tagged_addresses();
+    let mut pikachus = Pikachus::default();
 
-                ws.on_upgrade(move |socket| {
-                    handle_connection(socket, session_id, users.clone(), pikachus.clone())
-                })
-            },
-        );
-
-    let routes = ws_route.with(warp::cors().allow_any_origin());
-
-    task::spawn(async move {
-        println!("🚀 WebSocket server running at ws://0.0.0.0:9090/ws");
-        warp::serve(routes).run(([0, 0, 0, 0], 9090)).await;
-    });
-
-    let is_pruned = is_bitcoin_node_pruned();
-    let context = zmq::Context::new();
-    let subscriber = context.socket(zmq::SUB).expect("Failed to create socket");
-
-    let zmq_url = "tcp://127.0.0.1:28333";
-    subscriber
-        .connect(zmq_url)
-        .expect("Failed to connect to ZMQ");
-
-    subscriber
-        .set_subscribe(b"rawtx")
-        .expect("Failed to subscribe to rawtx");
-
-    println!("Listening for Bitcoin transactions on {}", zmq_url);
-    let mut data: Vec<GenTransaction> = Vec::new();
-    loop {
-        let topic = subscriber.recv_string(0);
-        match topic {
-            Ok(Ok(topic_str)) => {
-                let tx_data = subscriber.recv_bytes(0).expect("Failed to receive tx data");
-                let tx_hex = hex::encode(&tx_data);
-
-                println!("New transaction received:");
-                println!("Topic: {:?}", topic_str);
-
-                if let Ok(tx) = deserialize::<Transaction>(&tx_data) {
-                    println!("\n🔹 **Detecting OUTGOING (Sender) Addresses**:");
-                    let mut inputs = Vec::new();
-                    for (i, input) in tx.input.iter().enumerate() {
-                        let prev_txid = input.previous_output.txid.to_string();
-
-                        println!("Input {}: Spends from previous TXID {}", i, prev_txid);
-
-                        if let Some(prev_tx) = fetch_previous_tx(&prev_txid, &is_pruned).await {
-                            println!("Fetched previous transaction: {}", prev_txid);
-                            let temp = process_outputs(&prev_tx);
-                            inputs.push(InputTrans {
-                                txid: prev_txid,
-                                output_address: temp,
-                            });
-                        } else {
-                            println!("❌ Failed to fetch previous transaction for {}", prev_txid);
-                        }
-                    }
-
-                    println!("\n🔹 **Detecting INCOMING (Receiver) Addresses**:");
-                    let temp = process_outputs(&tx);
-                    let genesis = GenTransaction {
-                        txid: tx.compute_txid().to_string(),
-                        output_address: temp,
-                        input_address: inputs,
-                    };
-                    let urs = pikachus.lock().unwrap();
-                    let genesis_outs: HashSet<_> = genesis.output_address.iter().collect();
-
-                    urs.iter().for_each(|(user, user_addrs)| {
-                        let matching_outs: Vec<_> = user_addrs
-                            .iter()
-                            .filter(|addr| genesis_outs.contains(addr))
-                            .collect();
-
-                        if !matching_outs.is_empty() {
-                           let message = format!(
-                                "Your watch list Address {:?} has been spent in this tx {}",
-                                matching_outs, genesis.txid
-                            );
-                            println!("----- Attempting to send:: {}", message);
-                            send_message_to_user(&users, user.to_string(), Message::text(message));
-                        }
-
-                        genesis.input_address.iter().for_each(|f|{
-                            let genesis_ins:Vec<_> =f.output_address.iter().collect();
-                            let matching_ins:Vec<_>=user_addrs.iter().filter(|addr| genesis_ins.contains(addr)).collect();
-                            if !matching_ins.is_empty(){
-                                let message = format!(
-                                    "Your watch list Address {:?} has been spent as an input for this tx {}. The input was previously funnded by this tx: {}",
-                                    matching_outs, genesis.txid,f.txid
-                                );
-                            println!("----- Attempting to send:: {}", message);
-                                send_message_to_user(&users, user.to_string(), Message::text(message));
-                            }
-
-                        });
-
-
-                    });
-                    data.push(genesis);
-                } else {
-                    println!("Failed to decode transaction.");
-                }
-            }
-            Ok(Err(e)) => println!("Received non-UTF8 topic: ",),
-            Err(e) => eprintln!("Error receiving message: {}", e),
-        }
-        println!(
-            "-----------Genesis Tree-------------------{}--------------------------",
-            data.len()
-        );
-    }
-}
-
-fn process_outputs(tx: &Transaction) -> Vec<Address> {
-    let mut outs: Vec<Address> = [].to_vec();
-    for (i, output) in tx.output.iter().enumerate() {
-        if let Ok(address) = Address::from_script(&output.script_pubkey, Network::Bitcoin) {
-            println!(
-                "Output {}: Address = {} (Amount: {} sats)",
-                i, address, output.value
-            );
-            outs.push(address);
-        } else {
-            println!("Output {}: Could not decode address", i);
-        }
-    }
-    outs
-}
-
-#[derive(Debug, Serialize)]
-struct GenTransaction {
-    txid: String,
-    output_address: Vec<Address>,
-    input_address: Vec<InputTrans>,
-}
-
-#[derive(Debug, Serialize)]
-struct InputTrans {
-    txid: String,
-    output_address: Vec<Address>,
-}
-
-fn with_users(
-    users: Users,
-) -> impl Filter<Extract = (Users,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || users.clone())
-}
-
-fn with_pikachus(
-    pikachus: Pikachus,
-) -> impl Filter<Extract = (Pikachus,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || pikachus.clone())
-}
-
-async fn handle_connection(ws: WebSocket, session_id: String, users: Users, pikachus: Pikachus) {
-    let (mut tx, mut rx) = ws.split();
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-
-    println!("✅ User {} connected", session_id);
-    users.lock().unwrap().insert(session_id.clone(), sender);
-
-    tokio::spawn(async move {
-        while let Some(Ok(msg)) = rx.next().await {
-            if let Ok(text) = msg.to_str() {
-                if let Ok(addr) = Address::from_str(text) {
-                    let mut info = pikachus.lock().unwrap();
-                    info.entry(session_id.clone())
-                        .or_insert_with(Vec::new)
-                        .push(Address::assume_checked(addr));
-                    send_message_to_user(
-                        &users,
-                        session_id.clone(),
-                        Message::text(format!("📩 Message Received {}: {}", session_id, text)),
-                    );
-                    println!("📩 Message from {}: {}", session_id, text);
-                } else {
-                }
-            }
-        }
-    });
-
-    while let Some(msg) = receiver.recv().await {
-        let _ = tx.send(msg).await;
-    }
-}
-
-fn send_message_to_user(users: &Users, session_id: String, message: Message) {
-    let users = Arc::clone(users);
-    task::spawn(async move {
-        let users_locked = users.lock().unwrap();
-
-        if let Some(tx) = users_locked.get(&session_id) {
-            if tx.send(message).is_err() {
-                println!("❌ User {} is disconnected", session_id);
+    if let Ok(t) = all_addr {
+        for e in t {
+            let entry = pikachus
+                .entry(e.nostr_pubkey.clone())
+                .or_insert_with(Vec::new);
+            if let Ok(addr) = Address::from_str(&e.address) {
+                entry.push(Address::assume_checked(addr));
             } else {
-                println!("✅ Message sent to {}", session_id);
-            }
-        } else {
-            println!("⚠️ User {} not found", session_id);
-        }
-    });
-}
-
-async fn broadcast_message(users: &Users, message: Message) {
-    let mut disconnected_users = Vec::new(); // Collect disconnected users
-
-    {
-        let users_locked = users.lock().unwrap(); // Lock only once
-        for (user_id, tx) in users_locked.iter() {
-            if tx.send(message.clone()).is_err() {
-                disconnected_users.push(user_id.clone()); // Collect disconnected user IDs
+                eprintln!("❌ Failed to parse address::{}", e.address);
             }
         }
-    } // 🔥 Unlock here before modifying the HashMap
-
-    if !disconnected_users.is_empty() {
-        let mut users_locked = users.lock().unwrap();
-        for user_id in disconnected_users {
-            users_locked.remove(&user_id); // Remove disconnected users
-        }
+    } else {
+        eprintln!("❌ Failed to fetch addresses from DB.");
     }
+
+    pikachus
 }
+
