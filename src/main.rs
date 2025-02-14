@@ -7,6 +7,7 @@ use hex;
 use models::{GenTransaction, InputTrans};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::{Error, ErrorKind};
 use std::process::{exit, Command};
 use std::str::FromStr;
 use tokio::task;
@@ -18,6 +19,7 @@ pub mod models;
 pub mod nostr_notify;
 pub mod routes;
 pub mod schema;
+pub mod tests;
 
 // Maps nostr_pubkey -> [Bitcoin addresses]
 type Pikachus = HashMap<String, Vec<Address>>;
@@ -42,7 +44,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    let is_pruned = is_bitcoin_node_pruned();
+    let is_pruned = is_bitcoin_node_pruned()?;
     let context = zmq::Context::new();
     let subscriber = context.socket(zmq::SUB).expect("Failed to create socket");
 
@@ -200,15 +202,14 @@ async fn fetch_previous_tx(prev_txid: &str, is_pruned: &bool) -> Option<Transact
     }
 }
 
-fn is_bitcoin_node_pruned() -> bool {
+/// Checks if the local bitcoind node is pruned or not
+fn is_bitcoin_node_pruned() -> Result<bool,Error> {
     let output = Command::new("bitcoin-cli")
         .arg("getblockchaininfo")
-        .output();
-    match output {
-        Ok(res) => {
-            println!("{:?}", String::from_utf8_lossy(&res.stderr));
-            if res.status.success() {
-                let raw_json = String::from_utf8_lossy(&res.stdout);
+        .output()?;
+
+            if output.status.success() {
+                let raw_json = String::from_utf8_lossy(&output.stdout);
                 let json: Value = serde_json::from_str(&raw_json).expect("Failed to parse JSON");
                 println!("✅ Bitcoin node network:: {}", json["chain"]);
                 if let Some(pruned) = json["pruned"].as_bool() {
@@ -217,20 +218,15 @@ fn is_bitcoin_node_pruned() -> bool {
                             "✅ Bitcoin node is pruned. Prune height: {}",
                             json["pruneheight"]
                         );
-                        return true;
+                        return Ok(true);
                     }
                 }
-                false
+                Ok(false)
             } else {
-                false
+                println!("{:?}", String::from_utf8_lossy(&output.stderr));
+                Err(Error::new(ErrorKind::Other, String::from_utf8_lossy(&output.stderr)))
             }
-        }
-        Err(er) => {
-            println!("{}", er);
-            false
-        }
     }
-}
 
 fn process_tagged_addresses_from_db() -> Pikachus {
     let all_addr = db_operations::get_all_tagged_addresses();

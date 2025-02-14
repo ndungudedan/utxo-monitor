@@ -41,9 +41,38 @@ pub async fn get_nostr_client() -> &'static Client {
 
             setup_relays(&client).await;
             client.connect().await;
+            setup_dm_clients(&client).await;
             client
         })
         .await
+}
+
+async fn setup_dm_clients(client: &Client) {
+    let signer = client.signer().await.unwrap();
+    let public_key = signer.get_public_key().await.unwrap();
+
+    let relays = vec![
+        Url::parse("wss://auth.nostr1.com").unwrap(),
+        Url::parse("wss://relay.0xchat.com").unwrap(),
+    ];
+
+    let tags: Vec<Tag> = relays
+        .into_iter()
+        .map(|relay| Tag::custom(TagKind::Relay, vec![relay.to_string()]))
+        .collect();
+
+    let event = EventBuilder::new(Kind::InboxRelays, "")
+        .tags(tags)
+        .build(public_key)
+        .sign(&signer)
+        .await
+        .unwrap();
+
+    let output = client.send_event(event).await;
+    match output {
+        Ok(t) => println!("setup_dm_clients:: {:?}", t),
+        Err(e) => eprintln!("setup_dm_clients:: {:?}", e),
+    }
 }
 
 pub fn send_message(message: String, pubkey: String) {
