@@ -30,15 +30,12 @@ pub async fn store_monitored_addresses(
     let pubkey: Option<String> = req.cookie("nostr_pubkey").map(|c| c.value().to_string());
 
     if let Some(pubkey) = pubkey {
-        if let Some(address) = payload.get("address").and_then(|v| v.as_str()) {
-            if let Ok(addr) = Address::from_str(&address) {
-                let addr = Address::assume_checked(addr);
+        if let Some(address) = payload.get("address").and_then(|v| v.to_string()) {
+                let addr = RecordType::try_from(addr)?;
                 db_operations::store_user_address(pubkey.clone(), addr.clone().to_string());
                 nostr_notify::send_message(format!("Address added: {}", addr), pubkey);
                 HttpResponse::Ok().body("Address stored successfully")
-            } else {
-                HttpResponse::BadRequest().body("Address not set")
-            }
+
         } else {
             HttpResponse::BadRequest().body("Invalid payload: missing 'address'")
         }

@@ -2,3 +2,5 @@
 ~/
 .env
 diesel.toml
+/logs
+nohup.*

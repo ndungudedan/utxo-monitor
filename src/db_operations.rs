@@ -7,7 +7,7 @@ use diesel::{
 
 use crate::{
     db,
-    models::{MatchedAddress, User, UserAddress},
+    models::{MatchedEvent, User, UserAddress},
     schema::{matched_addresses, user_addresses, users},
 };
 
@@ -40,7 +40,7 @@ pub fn store_matched_address(
     txid: String,
     prev_txid: Option<String>,
 ) {
-    let new_match = MatchedAddress {
+    let new_match = MatchedEvent {
         nostr_pubkey,
         txid,
         prev_txid,

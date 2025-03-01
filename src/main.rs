@@ -21,8 +21,8 @@ pub mod routes;
 pub mod schema;
 pub mod tests;
 
-// Maps nostr_pubkey -> [Bitcoin addresses]
-type Pikachus = HashMap<String, Vec<Address>>;
+// Maps nostr_pubkey -> [Bitcoin RecordType]
+type Pikachus = HashMap<String, Vec<RecordType>>;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
                 let tx_data = subscriber.recv_bytes(0).expect("Failed to receive tx data");
                 let tx_hex = hex::encode(&tx_data);
 
-                println!("New transaction received:: {:?}", tx_hex);
+                // println!("New transaction received:: {:?}", tx_hex);
 
                 if let Ok(tx) = deserialize::<Transaction>(&tx_data) {
                     find_address_match(tx, is_pruned).await;
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
 }
 
 fn process_outputs(tx: &Transaction) -> Vec<Address> {
-    println!("\n🔹 **Detecting DELIVERY (Receiver) Addresses**:");
+    // println!("\n🔹 **Detecting DELIVERY (Receiver) Addresses**:");
     let mut outs: Vec<Address> = [].to_vec();
     for (i, output) in tx.output.iter().enumerate() {
         if let Ok(addr) = Address::from_script(&output.script_pubkey, Network::Bitcoin) {
@@ -98,22 +98,22 @@ fn process_outputs(tx: &Transaction) -> Vec<Address> {
 }
 
 async fn process_inputs(tx: &Transaction, is_pruned: bool) -> Vec<InputTrans> {
-    println!("\n🔹 **Detecting SOURCING (Sender) Addresses**:");
+    // println!("\n🔹 **Detecting SOURCING (Sender) Addresses**:");
     let mut inputs = Vec::new();
     for (i, input) in tx.input.iter().enumerate() {
         let prev_txid = input.previous_output.txid.to_string();
 
-        println!("Input {}: Spends from previous TXID {}", i, prev_txid);
+        // println!("Input {}: Spends from previous TXID {}", i, prev_txid);
 
         if let Some(prev_tx) = fetch_previous_tx(&prev_txid, &is_pruned).await {
-            println!("Fetched previous transaction: {}", prev_txid);
+            // println!("Fetched previous transaction: {}", prev_txid);
             let temp = process_outputs(&prev_tx);
             inputs.push(InputTrans {
                 txid: prev_txid,
                 output_address: temp,
             });
         } else {
-            println!("❌ Failed to fetch previous transaction for {}", prev_txid);
+            // println!("❌ Failed to fetch previous transaction for {}", prev_txid);
         }
     }
     inputs
@@ -127,7 +127,7 @@ async fn find_address_match(tx: Transaction, is_pruned: bool) {
         output_address: outputs,
         input_address: inputs,
     };
-    println!("{:?}", genesis);
+    // println!("{:?}", genesis);
     let pikachus = process_tagged_addresses_from_db();
     let genesis_outs: HashSet<_> = genesis.output_address.iter().collect();
     println!(
@@ -162,7 +162,6 @@ async fn find_address_match(tx: Transaction, is_pruned: bool) {
                     matching_ins, genesis.txid,f.txid
                 );
                 db_operations::store_matched_address(user.clone(), (*matching_ins).to_vec(), genesis.txid.clone(),Some(f.txid.clone()));
-            println!("----- Attempting to send:: {}", message);
             nostr_notify::send_message(message,user.to_string());
             }
 
@@ -173,7 +172,7 @@ async fn find_address_match(tx: Transaction, is_pruned: bool) {
 async fn fetch_previous_tx(prev_txid: &str, is_pruned: &bool) -> Option<Transaction> {
     if *is_pruned {
         let url = format!("https://mempool.space/api/tx/{}/hex", prev_txid);
-        println!("{}", url);
+        // println!("{}", url);
         let response = reqwest::get(&url).await;
         match response {
             Ok(res) => {
